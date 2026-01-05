@@ -8,6 +8,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import 'package:battery_plus/battery_plus.dart';
+import 'package:FocusDesk/screens/dashboard_page.dart';
 import '../providers/app_provider.dart';
 
 class FocusAnimationPage extends StatefulWidget {
@@ -19,31 +20,34 @@ class FocusAnimationPage extends StatefulWidget {
 
 class _FocusAnimationPageState extends State<FocusAnimationPage> {
   // --- CONFIGURATION ---
-  final List<String> _currentImages = [];
+  final List<String> _currentImages = []; //this list is needed to store the wallpaper of the app
+
   final List<String> _defaultAssets = [
     'assets/bg1.jpg',
     'assets/bg2.jpg',
     'assets/bg3.jpg',
     'assets/bg4.jpg',
     'assets/bg5.jpg',
-  ];
+  ]; // this is by default wallpaper for the app
 
   // --- STATE VARIABLES ---
-  int _imageIndex = 0;
-  Timer? _slideshowTimer;
-  Timer? _clockTimer;
-  DateTime _now = DateTime.now();
+  int _imageIndex = 0;  // to count the image index
+  Timer? _slideshowTimer;  // to count after how much time we need to change the wallpaper
+  Timer? _clockTimer;      // to show the current time
+  DateTime _now = DateTime.now(); // to show today's date
 
   // Battery State
-  final Battery _battery = Battery();
-  int _batteryLevel = 100;
+  final Battery _battery = Battery(); // to show the current battery percentage , direct dependency use
+  int _batteryLevel = 100;  // by default making it 100
 
   // Clock State
-  Offset _clockPosition = const Offset(100, 100);
-  double _clockFontSize = 30.0;
-  double _baseScaleFactor = 1.0;
+  Offset _clockPosition = const Offset(100, 100);  // to se the initial position of the clock
+  double _clockFontSize = 30.0;  // to set the initial size of the clock
+  double _baseScaleFactor = 1.0;  //by default it is set to 1 , but when u change it to get a new size the app should remember the latest size changed by u this will help
   double _scaleFactor = 1.0;
 
+
+  // the below function is just to initialize the page but before that we ensure every thing is built and painted properly
   @override
   void initState() {
     super.initState();
@@ -52,8 +56,10 @@ class _FocusAnimationPageState extends State<FocusAnimationPage> {
     });
   }
 
+
+  // this function shows how u initialize the app
   void _initializePage() {
-    final provider = context.read<AppProvider>();
+    final provider = context.read<AppProvider>(); // to call provider whenever needed
 
     // 1. CHECK WALLPAPER STATUS FROM PROVIDER
     if (provider.isWallpaperSetupDone && provider.wallpaperPaths.isNotEmpty) {
@@ -65,7 +71,6 @@ class _FocusAnimationPageState extends State<FocusAnimationPage> {
       // First time? Show setup dialog
       _showSetupDialog();
     }
-
     _getBatteryLevel();
   }
 
@@ -130,6 +135,7 @@ class _FocusAnimationPageState extends State<FocusAnimationPage> {
           // 1. BACKGROUND SLIDESHOW
           if (_currentImages.isNotEmpty)
             Positioned.fill(
+              // this AnimatedSwitcher only helps u to change the wallpaper from one to another with sooth animation
               child: AnimatedSwitcher(
                 duration: const Duration(milliseconds: 500),
                 child: Container(
@@ -140,7 +146,7 @@ class _FocusAnimationPageState extends State<FocusAnimationPage> {
                       fit: BoxFit.cover,
                     ),
                   ),
-                  child: Container(color: Colors.black.withValues(alpha: 0.3)),
+                  child: Container(color: Colors.black.withValues(alpha: 0.3)),  // because of this line u feel the wallpaper little darker we will experiment with this
                 ),
               ),
             ),
@@ -157,8 +163,10 @@ class _FocusAnimationPageState extends State<FocusAnimationPage> {
                 onScaleUpdate: (details) {
                   setState(() {
                     _clockPosition += details.focalPointDelta;
+                    // Dragging: _clockPosition += details.focalPointDelta adds the distance your finger moved to the clock's current position.
                     if (details.scale != 1.0) {
                       _scaleFactor = (_baseScaleFactor * details.scale).clamp(0.5, 4.0);
+                      // Zooming: _scaleFactor = ... calculates the new size based on how far apart your fingers are. The .clamp(0.5, 4.0) part sets limits so you can't make the clock microscopic (0.5x) or gigantic (4.0x).
                     }
                   });
                 },
@@ -196,6 +204,28 @@ class _FocusAnimationPageState extends State<FocusAnimationPage> {
               },
             ),
           ),
+          Positioned(
+            bottom: 20,
+            right: 20,
+            child: _buildGlassButton(
+              icon: Icons.insights, // Sci-fi style chart icon
+              onTap: () async {
+                // A. Switch to Portrait because Dashboard looks better in vertical
+                await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+
+                if (!context.mounted) return;
+
+                // B. Navigate to Dashboard
+                await Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const DashboardPage()),
+                );
+
+                // C. When user comes back, Force Landscape again for Focus Mode
+                _enterFocusMode();
+              },
+            ),
+          ),
         ],
       ),
     );
@@ -223,12 +253,17 @@ class _FocusAnimationPageState extends State<FocusAnimationPage> {
     );
   }
 
+  // see u have 2 major button, info button and goal button , both of those button when click
+  // similar widget appears just the content and the way they appear is differ , this is because
+  //the below smart function , it is build once but changes its content and animation where to
+  //come from depending isRightSide called it or left
+
   void _openSideMenu({required bool isRightSide}) {
     showGeneralDialog(
       context: context,
       barrierDismissible: true,
       barrierLabel: "Dismiss",
-      barrierColor: Colors.black54,
+      barrierColor: Colors.black54,  // when u click on the button and widget appear the background become dim u notice , this is the line which is doing that
       transitionDuration: const Duration(milliseconds: 300),
       pageBuilder: (ctx, anim1, anim2) {
         return Align(
@@ -408,7 +443,7 @@ class _FocusAnimationPageState extends State<FocusAnimationPage> {
       builder: (ctx) => AlertDialog(
         backgroundColor: Colors.grey[900],
         title: Text("Focus Mode Setup", style: GoogleFonts.orbitron(color: Colors.cyanAccent)),
-        content: const Text("Choose your environment...", style: TextStyle(color: Colors.white70)),
+        content: const Text("Choose your Wallpaper", style: TextStyle(color: Colors.white70)),
         actions: [
           TextButton(
             onPressed: () {

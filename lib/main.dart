@@ -1,3 +1,4 @@
+import 'package:FocusDesk/screens/FailureReasonPage.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -8,6 +9,7 @@ import 'screens/name_input_page.dart';
 import 'screens/goal_setting_page.dart';
 import 'screens/night_rest_page.dart';
 import 'screens/animation_page.dart';
+import 'screens/FailureReasonPage.dart';
 
 void main() {
   runApp(
@@ -55,6 +57,11 @@ class ScreenRouter extends StatelessWidget {
         return const NightRestPage();
       case AppState.dashboard:
         return const FocusAnimationPage();
+
+    // --- 2. ADD THIS CASE ---
+      case AppState.failureReason:
+        return const FailureReasonPage();
+
       default:
         return const Scaffold(body: Center(child: Text("Error: Unknown State")));
     }
