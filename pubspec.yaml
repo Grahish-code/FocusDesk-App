@@ -21,8 +21,11 @@ dependencies:
   wakelock_plus: ^1.4.0
   battery_plus: ^7.0.0
 
+  external_app_launcher: ^4.0.3
+
 
   cupertino_icons: ^1.0.8
+  font_awesome_flutter: ^10.12.0
 
 
 

@@ -2,22 +2,31 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:intl/intl.dart';
 import 'dart:convert';
+import 'dart:async';
+import 'dart:developer'; // For logging
+import 'package:flutter/services.dart'; // REQUIRED for MethodChannel & EventChannel
+import 'package:external_app_launcher/external_app_launcher.dart';
 
+// --- ENUMS ---
 enum AppState { loading, nameInput, goalSetting, nightRest, dashboard, failureReason }
 
-class AppProvider extends ChangeNotifier {
+class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
+  // --- STATE VARIABLES ---
   AppState _currentState = AppState.loading;
   String _userName = "";
   bool _goalsCompleted = false;
+
+  Timer? _timeCheckTimer;
 
   // 1. DATA STORAGE
   List<String> _savedGoals = [];
   Map<String, bool> _goalStates = {};
 
+
   List<String> _wallpaperPaths = [];
   bool _isWallpaperSetupDone = false;
 
-  // 2. GETTERS (UI Reads these)
+  // 2. GETTERS
   AppState get currentState => _currentState;
   String get userName => _userName;
   bool get goalsCompleted => _goalsCompleted;
@@ -26,11 +35,67 @@ class AppProvider extends ChangeNotifier {
   List<String> get wallpaperPaths => _wallpaperPaths;
   bool get isWallpaperSetupDone => _isWallpaperSetupDone;
 
+  // Default value
+  String _avatarUrl = "https://api.dicebear.com/9.x/lorelei/png?seed=Sasha";
+
+  // --- NOTIFICATION STATE ---
+  List<NotificationEvent> _notifications = [];
+  bool _hasNewNotifications = false;
+
+  List<NotificationEvent> get notifications => _notifications;
+  bool get hasNewNotifications => _hasNewNotifications;
+
+  // --- NATIVE CHANNELS (Must match MainActivity.kt exactly) ---
+  static const _methodChannel = MethodChannel('com.example.focusdesk/settings');      // For Buttons
+  static const _eventChannel = EventChannel('com.example.focusdesk/notifications');   // For Data Streams
+
+  String get avatarUrl => _avatarUrl;
+
+  StreamSubscription? _subscription;
+
+  // --- CONSTRUCTOR ---
   AppProvider() {
+    // 1. Start listening to App Lifecycle (Background/Foreground changes)
+    WidgetsBinding.instance.addObserver(this);
     _initApp();
+    // NEW: Check every minute
+    _timeCheckTimer = Timer.periodic(const Duration(minutes: 1), (timer) {
+      _refreshTimeCheck();
+    });
   }
-  
- // --- INITIALIZATION ---
+
+  // --- DISPOSE (CLEANUP) ---
+  @override
+  void dispose() {
+    // 2. Stop listening to lifecycle changes to prevent memory leaks
+    WidgetsBinding.instance.removeObserver(this);
+    _subscription?.cancel();
+    _timeCheckTimer?.cancel(); // <--- Stop the timer
+    super.dispose();
+  }
+
+  // =========================================================
+  // LIFECYCLE LISTENER (THE FIX)
+  // =========================================================
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 3. When the app comes back to the foreground (Resumed)
+    if (state == AppLifecycleState.resumed) {
+      // Force a re-check of Time and Goals
+      _refreshTimeCheck();
+    }
+  }
+
+  Future<void> _refreshTimeCheck() async {
+    // We grab prefs again and run the exact same logic as startup
+    final prefs = await SharedPreferences.getInstance();
+    await _checkTimeAndGoals(prefs);
+    // notifyListeners() is called inside _checkTimeAndGoals, so UI updates automatically
+  }
+
+  // =========================================================
+  // INITIALIZATION & CORE LOGIC
+  // =========================================================
   Future<void> _initApp() async {
     final prefs = await SharedPreferences.getInstance();
 
@@ -43,6 +108,11 @@ class AppProvider extends ChangeNotifier {
     }
     _userName = name;
 
+    String? savedAvatar = prefs.getString('user_avatar_url');
+    if (savedAvatar != null && savedAvatar.isNotEmpty) {
+      _avatarUrl = savedAvatar;
+    }
+
     // B. Check Wallpaper Memory
     _isWallpaperSetupDone = prefs.getBool('wallpaper_setup_done') ?? false;
     _wallpaperPaths = prefs.getStringList('saved_wallpapers') ?? [];
@@ -51,82 +121,34 @@ class AppProvider extends ChangeNotifier {
     await _checkTimeAndGoals(prefs);
   }
 
-
-  // TO save the user historical record in json later this will be user to make a dashboard page for user
-  Future<void> _addToHistory({
-    required String date,
-    required bool isSuccess,
-    required List<String> allGoals,
-    required Map<String, bool> goalStatus,
-    String? reason,
-  }) async {
+  Future<void> updateAvatar(String newUrl) async {
     final prefs = await SharedPreferences.getInstance();
 
-    // 1. Get existing history or create empty list
-    String? existingJson = prefs.getString('user_history_db');
-    List<dynamic> historyList = existingJson != null ? jsonDecode(existingJson) : [];
+    // 1. Save to phone storage
+    await prefs.setString('user_avatar_url', newUrl);
 
-    // 2. Check if this date already exists (Prevent Duplicates)
-    // We don't want to save Jan 4th twice if the user opens the app 5 times.
-    bool alreadyExists = historyList.any((record) => record['date'] == date);
-    if (alreadyExists) return;
+    // 2. Update local state
+    _avatarUrl = newUrl;
 
-    // 3. Categorize Goals
-    List<String> completedList = [];
-    List<String> incompleteList = [];
-
-    for (var goal in allGoals) {
-      if (goalStatus[goal] == true) {
-        completedList.add(goal);
-      } else {
-        incompleteList.add(goal);
-      }
-    }
-
-    // 4. Create the Record Object
-    Map<String, dynamic> newRecord = {
-      "date": date,
-      "status": isSuccess ? "Completed" : "Incomplete",
-      "total_goals": allGoals,
-      "completed_goals": completedList,
-      "incomplete_goals": incompleteList,
-      "reason": reason ?? "N/A" // Save "N/A" if success
-    };
-
-    // 5. Add to list and Save
-    historyList.add(newRecord);
-    await prefs.setString('user_history_db', jsonEncode(historyList));
-
-    debugPrint(" HISTORY SAVED: $newRecord");
+    // 3. Tell UI to update
+    notifyListeners();
   }
 
   Future<void> _checkTimeAndGoals(SharedPreferences prefs) async {
     final now = DateTime.now();
     final todayKey = DateFormat('yyyy-MM-dd').format(now);
-
     final yesterday = now.subtract(const Duration(days: 1));
     final yesterdayKey = DateFormat('yyyy-MM-dd').format(yesterday);
 
-    // =========================================================
-    // PHASE 1: NIGHT REST (00:00 - 06:00)
-    // Always show Night Rest, but load Yesterday's data
-    // so the UI can decide whether to say "Sleep Well, Champion" or "Rest up for tomorrow".
-    // =========================================================
+    // 1. Night Rest (00:00 - 06:00)
     if (now.hour >= 0 && now.hour < 6) {
-      // Load YESTERDAY'S data for the UI to display
       await _loadDataForDate(prefs, yesterdayKey);
-
       _currentState = AppState.nightRest;
       notifyListeners();
-      return; // STOP HERE. Do not check anything else.
+      return;
     }
 
-    // =========================================================
-    // PHASE 2: MORNING ACCOUNTABILITY (06:00 Onwards)
-    // Check if yesterday was a failure that needs explaining.
-    // =========================================================
-
-    // Did we even have goals yesterday? (Skip this if it's a fresh install)
+    // 2. Check Yesterday's Accountability
     bool yesterdayHadGoals = prefs.containsKey('goals_$yesterdayKey');
 
     if (yesterdayHadGoals) {
@@ -134,7 +156,6 @@ class AppProvider extends ChangeNotifier {
       bool reasonGiven = prefs.containsKey('reason_$yesterdayKey');
 
       if (yesterdayCompleted) {
-        // We load the data just to save it properly
         await _loadDataForDate(prefs, yesterdayKey);
         await _addToHistory(
             date: yesterdayKey,
@@ -144,24 +165,15 @@ class AppProvider extends ChangeNotifier {
         );
       }
 
-      // CONDITION: Failed + No Reason Given Yet
       if (!yesterdayCompleted && !reasonGiven) {
-        // Load YESTERDAY'S data so the Failure Page can show the unchecked boxes
         await _loadDataForDate(prefs, yesterdayKey);
-
         _currentState = AppState.failureReason;
         notifyListeners();
-        return; // STOP HERE. User is trapped until they give a reason.
+        return;
       }
     }
 
-    // =========================================================
-    // PHASE 3: TODAY'S FLOW
-    // If we reached here, either yesterday was a success,
-    // or the user has already admitted their failure.
-    // =========================================================
-
-    // Now load TODAY'S data
+    // 3. Load Today
     await _loadDataForDate(prefs, todayKey);
 
     if (_savedGoals.isNotEmpty) {
@@ -169,11 +181,9 @@ class AppProvider extends ChangeNotifier {
     } else {
       _currentState = AppState.goalSetting;
     }
-
     notifyListeners();
   }
 
-  // --- HELPER FUNCTION (To switch between loading Yesterday vs Today) ---
   Future<void> _loadDataForDate(SharedPreferences prefs, String dateKey) async {
     _savedGoals = prefs.getStringList('goals_$dateKey') ?? [];
     _goalsCompleted = prefs.getBool('completed_$dateKey') ?? false;
@@ -184,31 +194,9 @@ class AppProvider extends ChangeNotifier {
     }
   }
 
-  // --- ACTION: Submit Reason ---
-  Future<void> submitFailureReason(String reason) async {
-    final prefs = await SharedPreferences.getInstance();
-
-    // We are saving this reason for YESTERDAY
-    final now = DateTime.now();
-    final yesterday = now.subtract(const Duration(days: 1));
-    final yesterdayKey = DateFormat('yyyy-MM-dd').format(yesterday);
-
-    await prefs.setString('reason_$yesterdayKey', reason);
-
-    await _addToHistory(
-        date: yesterdayKey,
-        isSuccess: false,
-        allGoals: _savedGoals,
-        goalStatus: _goalStates,
-        reason: reason
-    );
-
-    // Re-run the main check.
-    // Since 'reasonGiven' will now be true, it will skip Phase 2 and go to Phase 3.
-    await _checkTimeAndGoals(prefs);
-  }
-
-  // --- ACTIONS ---
+  // =========================================================
+  // ACTIONS (Goals, History, Wallpapers)
+  // =========================================================
 
   Future<void> saveName(String name) async {
     final prefs = await SharedPreferences.getInstance();
@@ -230,7 +218,6 @@ class AppProvider extends ChangeNotifier {
 
     _savedGoals = goals;
     _goalStates.clear();
-
     _currentState = AppState.dashboard;
     notifyListeners();
   }
@@ -247,7 +234,6 @@ class AppProvider extends ChangeNotifier {
       await prefs.setBool('completed_$dateKey', allDone);
       _goalsCompleted = allDone;
     }
-
     notifyListeners();
   }
 
@@ -261,13 +247,211 @@ class AppProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> submitFailureReason(String reason) async {
+    final prefs = await SharedPreferences.getInstance();
+    final now = DateTime.now();
+    final yesterday = now.subtract(const Duration(days: 1));
+    final yesterdayKey = DateFormat('yyyy-MM-dd').format(yesterday);
+
+    await prefs.setString('reason_$yesterdayKey', reason);
+
+    await _addToHistory(
+        date: yesterdayKey,
+        isSuccess: false,
+        allGoals: _savedGoals,
+        goalStatus: _goalStates,
+        reason: reason
+    );
+    await _checkTimeAndGoals(prefs);
+  }
+
+  Future<void> _addToHistory({
+    required String date,
+    required bool isSuccess,
+    required List<String> allGoals,
+    required Map<String, bool> goalStatus,
+    String? reason,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    String? existingJson = prefs.getString('user_history_db');
+    List<dynamic> historyList = existingJson != null ? jsonDecode(existingJson) : [];
+
+    bool alreadyExists = historyList.any((record) => record['date'] == date);
+    if (alreadyExists) return;
+
+    List<String> completedList = [];
+    List<String> incompleteList = [];
+
+    for (var goal in allGoals) {
+      if (goalStatus[goal] == true) {
+        completedList.add(goal);
+      } else {
+        incompleteList.add(goal);
+      }
+    }
+
+    Map<String, dynamic> newRecord = {
+      "date": date,
+      "status": isSuccess ? "Completed" : "Incomplete",
+      "total_goals": allGoals,
+      "completed_goals": completedList,
+      "incomplete_goals": incompleteList,
+      "reason": reason ?? "N/A"
+    };
+
+    historyList.add(newRecord);
+    await prefs.setString('user_history_db', jsonEncode(historyList));
+  }
+
   Future<List<Map<String, dynamic>>> getHistory() async {
     final prefs = await SharedPreferences.getInstance();
     String? existingJson = prefs.getString('user_history_db');
     if (existingJson == null) return [];
-
-    // Convert the dynamic list to a strong Map type
     List<dynamic> rawList = jsonDecode(existingJson);
     return rawList.map((e) => Map<String, dynamic>.from(e)).toList();
   }
+
+  // =========================================================
+  // NOTIFICATION LOGIC (NATIVE BRIDGE)
+  // =========================================================
+
+  // 1. START LISTENING (Uses EventChannel)
+  void startListeningToNotifications() {
+    try {
+      _subscription = _eventChannel.receiveBroadcastStream().listen((dynamic event) {
+        if (event is Map) {
+          final String action = event['action'] ?? 'POST';
+          final String? id = event['id']; // This is now the "Smart ID" (Package|Title)
+
+          // Safety Check: If we don't have an ID, we can't do anything.
+          if (id == null || id.isEmpty) return;
+
+          if (action == "REMOVE") {
+            // --- HANDLE REMOVAL ---
+            // Synced with Desktop/Phone. If you read it there, it goes away here.
+            _notifications.removeWhere((n) => n.id == id);
+            if (_notifications.isEmpty) _hasNewNotifications = false;
+            notifyListeners();
+          }
+          else {
+            // --- HANDLE POST (Add or Update) ---
+            final String? title = event['title'];
+            final String? text = event['text'];
+            final String pkg = event['package'] ?? "";
+
+            // Ghost Check: If title or text is null, ignore it.
+            if (title == null || text == null) return;
+
+            // DEDUPLICATION: Check if we already have a row for this Sender (Smart ID)
+            final int existingIndex = _notifications.indexWhere((n) => n.id == id);
+
+            if (existingIndex != -1) {
+              // UPDATE: We found the sender. Update the text.
+              // This solves the "10 messages" spam. It just updates the same row 10 times.
+              _notifications[existingIndex] = NotificationEvent(
+                id: id,
+                packageName: pkg,
+                title: title,
+                text: text,
+                createAt: DateTime.now(),
+              );
+
+              // Optional: Move the updated conversation to the top
+              final updatedItem = _notifications.removeAt(existingIndex);
+              _notifications.insert(0, updatedItem);
+            } else {
+              // INSERT: New sender we haven't seen yet.
+              _notifications.insert(0, NotificationEvent(
+                id: id,
+                packageName: pkg,
+                title: title,
+                text: text,
+                createAt: DateTime.now(),
+              ));
+              _hasNewNotifications = true;
+            }
+            notifyListeners();
+          }
+        }
+      }, onError: (dynamic error) {
+        debugPrint("Native Bridge Error: $error");
+      });
+    } catch (e) {
+      debugPrint("Error connecting to notification stream: $e");
+    }
+  }
+
+  // 2. STOP LISTENING
+  void stopListening() {
+    _subscription?.cancel();
+  }
+
+  // 3. OPEN SETTINGS (Uses MethodChannel)
+  Future<void> openNotificationSettings() async {
+    try {
+      await _methodChannel.invokeMethod('openSettings');
+    } catch (e) {
+      debugPrint("Failed to open settings: $e");
+    }
+  }
+
+  // 4. OPEN APP (Uses external_app_launcher)
+  Future<void> openAppFromNotification(String? packageName) async {
+    if (packageName != null) {
+      try {
+        await LaunchApp.openApp(
+          androidPackageName: packageName,
+          openStore: false,
+        );
+      } catch (e) {
+        log("Error opening app: $e");
+      }
+    }
+  }
+
+  // 5. DISMISS NOTIFICATION
+  void dismissNotification(int index) {
+    if (index >= 0 && index < _notifications.length) {
+      _notifications.removeAt(index);
+      if (_notifications.isEmpty) {
+        _hasNewNotifications = false;
+      }
+      notifyListeners();
+    }
+  }
+
+
+
+
+  // NEW SAFE DISMISSAL METHOD
+  void dismissNotificationById(String id) {
+    _notifications.removeWhere((n) => n.id == id);
+    if (_notifications.isEmpty) {
+      _hasNewNotifications = false;
+    }
+    notifyListeners();
+  }
+
+  // 6. MARK AS READ (Turn off glow)
+  void markNotificationsAsRead() {
+    _hasNewNotifications = false;
+    notifyListeners();
+  }
+}
+
+// --- DATA MODEL ---
+class NotificationEvent {
+  final String id; // This MUST match the Android 'sbn.key'
+  final String packageName;
+  final String title;
+  final String text;
+  final DateTime createAt;
+
+  NotificationEvent({
+    required this.id,
+    required this.packageName,
+    required this.title,
+    required this.text,
+    required this.createAt,
+  });
 }

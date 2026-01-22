@@ -19,6 +19,27 @@ class _DisciplineGraphWidgetState extends State<DisciplineGraphWidget> {
   final double _graphHeight = 180.0;
 
   @override
+  void initState() {
+    super.initState();
+    // DEFAULT 1: Automatically select the LATEST day (last item) on startup
+    if (widget.history.isNotEmpty) {
+      _selectedIndex = widget.history.length - 1;
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant DisciplineGraphWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // If data changes (e.g. loads from API), reset selection to latest
+    if (widget.history != oldWidget.history && widget.history.isNotEmpty) {
+      setState(() {
+        // Keep current selection logic or reset to latest
+        _selectedIndex = widget.history.length - 1;
+      });
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     if (widget.history.isEmpty) {
       return Container(
@@ -31,13 +52,11 @@ class _DisciplineGraphWidgetState extends State<DisciplineGraphWidget> {
     return LayoutBuilder(
         builder: (context, constraints) {
           // 1. CALCULATE WIDTHS
-          // If Fit to Screen: Width is (Screen Width / Days). Else: Fixed 60px.
           double availableWidth = constraints.maxWidth;
           double effectiveDayWidth = _isFitToScreen
               ? availableWidth / widget.history.length
               : _fixedDayWidth;
 
-          // If Fit to Screen: Total width is Screen Width. Else: Days * 60px.
           double totalCanvasWidth = _isFitToScreen
               ? availableWidth
               : widget.history.length * _fixedDayWidth;
@@ -50,7 +69,6 @@ class _DisciplineGraphWidgetState extends State<DisciplineGraphWidget> {
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    // Title
                     Text(
                         _isFitToScreen ? "30-DAY OVERVIEW" : "SCROLL TO INSPECT",
                         style: GoogleFonts.orbitron(color: Colors.white38, fontSize: 10, letterSpacing: 2)
@@ -61,8 +79,15 @@ class _DisciplineGraphWidgetState extends State<DisciplineGraphWidget> {
                       onTap: () {
                         setState(() {
                           _isFitToScreen = !_isFitToScreen;
-                          // Reset selection when switching views to avoid confusion
-                          _selectedIndex = -1;
+
+                          // LOGIC CHANGED HERE AS REQUESTED:
+                          // If switching TO Fit (Overview) -> Select LATEST (Last index)
+                          // If switching TO Scroll (Inspect) -> Select FIRST (Index 0)
+                          if (_isFitToScreen) {
+                            _selectedIndex = widget.history.length - 1;
+                          } else {
+                            _selectedIndex = 0;
+                          }
                         });
                       },
                       borderRadius: BorderRadius.circular(20),
@@ -99,13 +124,11 @@ class _DisciplineGraphWidgetState extends State<DisciplineGraphWidget> {
               SizedBox(
                 height: _graphHeight,
                 child: SingleChildScrollView(
-                  // Only enable scrolling if NOT in "Fit to Screen" mode
                   scrollDirection: Axis.horizontal,
                   physics: _isFitToScreen ? const NeverScrollableScrollPhysics() : const BouncingScrollPhysics(),
-                  reverse: !_isFitToScreen, // Keep latest data on right
+                  reverse: !_isFitToScreen,
                   child: GestureDetector(
                     onTapUp: (details) {
-                      // Tap Logic handles both modes automatically
                       double dx = details.localPosition.dx;
                       int index = (dx / effectiveDayWidth).floor();
 
@@ -129,11 +152,10 @@ class _DisciplineGraphWidgetState extends State<DisciplineGraphWidget> {
 
               const SizedBox(height: 15),
 
-              // --- THE DETAIL POPUP ---
-              // We use AnimatedSwitcher so it fades out smoothly if Zoom mode changes
-              AnimatedOpacity(
+              // --- THE DETAIL POPUP (ALWAYS VISIBLE NOW) ---
+              // Removed AnimatedOpacity logic that hid it when -1
+              AnimatedSwitcher(
                 duration: const Duration(milliseconds: 300),
-                opacity: _selectedIndex != -1 ? 1.0 : 0.0,
                 child: _buildDetailCard(),
               ),
             ],
@@ -143,8 +165,10 @@ class _DisciplineGraphWidgetState extends State<DisciplineGraphWidget> {
   }
 
   Widget _buildDetailCard() {
-    if (_selectedIndex == -1 || _selectedIndex >= widget.history.length) {
-      return const SizedBox(height: 60); // Empty placeholder
+    // Safety check: If list is empty, return spacer.
+    // If _selectedIndex is -1 (shouldn't happen now), show nothing.
+    if (widget.history.isEmpty || _selectedIndex == -1 || _selectedIndex >= widget.history.length) {
+      return const SizedBox(height: 60);
     }
 
     final data = widget.history[_selectedIndex];
@@ -153,7 +177,9 @@ class _DisciplineGraphWidgetState extends State<DisciplineGraphWidget> {
     final total = (data['total_goals'] as List).length;
     final isSuccess = data['status'] == 'Completed';
 
+    // Key to trigger animation when data changes
     return Container(
+      key: ValueKey(_selectedIndex),
       width: double.infinity,
       padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 20),
       decoration: BoxDecoration(
@@ -213,7 +239,6 @@ class _DisciplineGraphWidgetState extends State<DisciplineGraphWidget> {
   }
 }
 
-// --- PAINTER (UNCHANGED LOGIC, JUST USES NEW WIDTH) ---
 class _ScrollableGraphPainter extends CustomPainter {
   final List<Map<String, dynamic>> history;
   final double dayWidth;
@@ -291,7 +316,7 @@ class _ScrollableGraphPainter extends CustomPainter {
         path.cubicTo(prevX + dayWidth/2, prevY, prevX + dayWidth/2, y, x, y);
       }
 
-      // Dynamic Dot Size (Smaller if zoomed out)
+      // Dynamic Dot Size
       double dotRadius = dayWidth < 30 ? 2 : 4;
       canvas.drawCircle(Offset(x, y), dotRadius, dotPaint);
 

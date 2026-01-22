@@ -1,11 +1,41 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // <--- 1. IMPORT THIS
 import 'package:provider/provider.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../providers/app_provider.dart';
 import 'package:FocusDesk/screens/dashboard_page.dart';
 
-class NightRestPage extends StatelessWidget {
+// 2. CHANGED TO STATEFUL WIDGET
+class NightRestPage extends StatefulWidget {
   const NightRestPage({super.key});
+
+  @override
+  State<NightRestPage> createState() => _NightRestPageState();
+}
+
+class _NightRestPageState extends State<NightRestPage> {
+
+  // 3. LOCK TO PORTRAIT ON START
+  @override
+  void initState() {
+    super.initState();
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.portraitDown,
+    ]);
+  }
+
+  // 4. UNLOCK WHEN LEAVING (To protect other landscape pages)
+  @override
+  void dispose() {
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.landscapeRight,
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.portraitDown,
+    ]);
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
