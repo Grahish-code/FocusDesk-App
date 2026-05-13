@@ -1,4 +1,4 @@
-name: FocusDesk
+name: focusdesk
 description: "A new Flutter project."
 
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -7,7 +7,6 @@ version: 1.0.0+1
 
 environment:
   sdk: ^3.9.0
-
 
 dependencies:
   flutter:
@@ -18,21 +17,28 @@ dependencies:
   provider: ^6.1.5+1
   permission_handler: ^12.0.1
   image_picker: ^1.2.1
-  wakelock_plus: ^1.4.0
   battery_plus: ^7.0.0
+  share_plus: ^12.0.1
+  path_provider: ^2.1.5
+  flutter_overlay_window: ^0.5.0
+  screen_state: ^4.1.1
+  flutter_tts: ^4.2.5
+  http: ^1.6.0
+  open_file: ^3.5.11
+
+  app_settings: ^7.0.0
 
   external_app_launcher: ^4.0.3
 
-
   cupertino_icons: ^1.0.8
   font_awesome_flutter: ^10.12.0
-
-
+  sqflite: ^2.4.2
+  path: ^1.9.1
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-
+  flutter_launcher_icons: ^0.14.4
 
   flutter_lints: ^5.0.0
 
@@ -46,5 +52,11 @@ flutter:
     - assets/bg3.jpg
     - assets/bg4.jpg
     - assets/bg5.jpg
+
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: true
+  image_path: "assets/AppIcon.ico"
+  min_sdk_android: 21
 
 

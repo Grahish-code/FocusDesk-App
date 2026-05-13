@@ -7,13 +7,14 @@ import '../providers/app_provider.dart';
 
 class GoalSettingPage extends StatefulWidget {
   const GoalSettingPage({super.key});
+
   @override
   State<GoalSettingPage> createState() => _GoalSettingPageState();
 }
 
 class _GoalSettingPageState extends State<GoalSettingPage> with SingleTickerProviderStateMixin {
   final TextEditingController _goalController = TextEditingController();
-  final ScrollController _scrollController = ScrollController(); // 1. Added ScrollController
+  final ScrollController _scrollController = ScrollController();
   final List<String> _goals = [];
 
   late AnimationController _animController;
@@ -42,7 +43,7 @@ class _GoalSettingPageState extends State<GoalSettingPage> with SingleTickerProv
   void dispose() {
     _animController.dispose();
     _goalController.dispose();
-    _scrollController.dispose(); // Dispose scroll controller
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -53,7 +54,6 @@ class _GoalSettingPageState extends State<GoalSettingPage> with SingleTickerProv
     return "GOOD EVENING";
   }
 
-  // --- FEATURE 1: ADD GOAL & AUTO SCROLL ---
   void _addGoal() {
     if (_goalController.text.isNotEmpty) {
       setState(() {
@@ -61,12 +61,11 @@ class _GoalSettingPageState extends State<GoalSettingPage> with SingleTickerProv
         _goalController.clear();
       });
 
-      // Schedules the scroll to happen immediately after the widget builds the new item
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_scrollController.hasClients) {
           _scrollController.animateTo(
-            _scrollController.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 300),
+              _scrollController.position.maxScrollExtent,
+              duration: const Duration(milliseconds: 300),
               curve: Curves.easeOut
           );
         }
@@ -74,7 +73,25 @@ class _GoalSettingPageState extends State<GoalSettingPage> with SingleTickerProv
     }
   }
 
-  // --- FEATURE 2: AESTHETIC CONFIRMATION LOGIC ---
+  // --- REST DAY LOGIC ---
+  void _handleRestDay() {
+    // Reuse the aesthetic dialog but with specific "Rest" styling/logic
+    _showConfirmationDialog(
+      title: "SYSTEM PAUSE",
+      message: "Are you sure you want to make it a rest day?",
+      color: Colors.indigoAccent, // Calmer color for rest
+      confirmText: "CONFIRM REST",
+      onConfirm: () {
+        setState(() {
+          _goals.clear();
+          _goals.add("Rest Day - Recovery Mode"); // Auto-add a rest entry
+        });
+        context.read<AppProvider>().saveGoals(_goals);
+      },
+    );
+  }
+
+  // --- LOCK IN LOGIC ---
   void _handleLockIn() {
     int count = _goals.length;
     String title;
@@ -95,15 +112,30 @@ class _GoalSettingPageState extends State<GoalSettingPage> with SingleTickerProv
       statusColor = Colors.cyanAccent;
     }
 
-    _showConfirmationDialog(title, message, statusColor);
+    _showConfirmationDialog(
+      title: title,
+      message: message,
+      color: statusColor,
+      confirmText: "INITIATE",
+      onConfirm: () {
+        context.read<AppProvider>().saveGoals(_goals);
+      },
+    );
   }
 
-  void _showConfirmationDialog(String title, String message, Color color) {
+  // --- UNIVERSAL DIALOG (Refactored to accept onConfirm) ---
+  void _showConfirmationDialog({
+    required String title,
+    required String message,
+    required Color color,
+    required VoidCallback onConfirm,
+    required String confirmText,
+  }) {
     showGeneralDialog(
       context: context,
       barrierDismissible: true,
       barrierLabel: "Dismiss",
-      barrierColor: Colors.black.withOpacity(0.8), // Darken background
+      barrierColor: Colors.black.withOpacity(0.8),
       transitionDuration: const Duration(milliseconds: 300),
       pageBuilder: (context, anim1, anim2) {
         return Center(
@@ -150,12 +182,10 @@ class _GoalSettingPageState extends State<GoalSettingPage> with SingleTickerProv
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
-                      // Cancel Button
                       TextButton(
                         onPressed: () => Navigator.pop(context),
                         child: Text("ADJUST", style: _orbitron.copyWith(color: Colors.white54)),
                       ),
-                      // Confirm Button
                       ElevatedButton(
                         style: ElevatedButton.styleFrom(
                             backgroundColor: color,
@@ -164,11 +194,11 @@ class _GoalSettingPageState extends State<GoalSettingPage> with SingleTickerProv
                             shadowColor: color.withOpacity(0.5)
                         ),
                         onPressed: () {
-                          Navigator.pop(context); // Close dialog
-                          context.read<AppProvider>().saveGoals(_goals); // Save
+                          Navigator.pop(context);
+                          onConfirm(); // Execute the passed logic
                         },
                         child: Text(
-                          "INITIATE",
+                          confirmText,
                           style: _orbitron.copyWith(color: Colors.black, fontWeight: FontWeight.bold),
                         ),
                       ),
@@ -192,9 +222,7 @@ class _GoalSettingPageState extends State<GoalSettingPage> with SingleTickerProv
   @override
   Widget build(BuildContext context) {
     String userName = context.watch<AppProvider>().userName;
-    if (userName.isEmpty) {
-      userName = "WARRIOR";
-    }
+    if (userName.isEmpty) userName = "WARRIOR";
 
     final dateString = DateFormat('EEEE, d MMM').format(DateTime.now());
 
@@ -213,7 +241,7 @@ class _GoalSettingPageState extends State<GoalSettingPage> with SingleTickerProv
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // ANIMATED HEADER
+                // HEADER
                 SlideTransition(
                   position: _slideAnimation,
                   child: FadeTransition(
@@ -253,7 +281,7 @@ class _GoalSettingPageState extends State<GoalSettingPage> with SingleTickerProv
                 // GOAL LIST
                 Expanded(
                   child: ListView.builder(
-                    controller: _scrollController, // ATTACHED CONTROLLER
+                    controller: _scrollController,
                     itemCount: _goals.length,
                     itemBuilder: (context, index) => Container(
                       margin: const EdgeInsets.only(bottom: 10),
@@ -283,7 +311,31 @@ class _GoalSettingPageState extends State<GoalSettingPage> with SingleTickerProv
                   ),
                 ),
 
-                // INPUT FIELD
+                // REST DAY BUTTON (Added here)
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: 4.0), // Spacing above the '+' icon
+                    child: TextButton.icon(
+                      onPressed: _handleRestDay,
+                      icon: const Icon(Icons.bedtime, size: 16, color: Colors.white54),
+                      label: Text(
+                          "REST DAY",
+                          style: _orbitron.copyWith(
+                              fontSize: 12,
+                              color: Colors.white54,
+                              fontWeight: FontWeight.bold
+                          )
+                      ),
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        splashFactory: NoSplash.splashFactory, // Keeps it subtle
+                      ),
+                    ),
+                  ),
+                ),
+
+                // INPUT ROW
                 Row(
                   children: [
                     Expanded(
@@ -300,12 +352,12 @@ class _GoalSettingPageState extends State<GoalSettingPage> with SingleTickerProv
                                 borderSide: BorderSide.none
                             )
                         ),
-                        onSubmitted: (_) => _addGoal(), // Uses new method
+                        onSubmitted: (_) => _addGoal(),
                       ),
                     ),
                     const SizedBox(width: 10),
                     FloatingActionButton(
-                        onPressed: _addGoal, // Uses new method
+                        onPressed: _addGoal,
                         backgroundColor: Colors.cyanAccent,
                         child: const Icon(Icons.add, color: Colors.black)
                     ),
@@ -321,7 +373,7 @@ class _GoalSettingPageState extends State<GoalSettingPage> with SingleTickerProv
                   child: ElevatedButton(
                     onPressed: _goals.isEmpty
                         ? null
-                        : _handleLockIn, // USES NEW LOGIC
+                        : _handleLockIn,
                     style: ElevatedButton.styleFrom(
                         backgroundColor: _goals.isEmpty ? Colors.grey[800] : Colors.cyanAccent,
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))

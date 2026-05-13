@@ -1,457 +1,551 @@
+import 'package:focusdesk/services/notification_service.dart';
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:intl/intl.dart';
-import 'dart:convert';
 import 'dart:async';
-import 'dart:developer'; // For logging
-import 'package:flutter/services.dart'; // REQUIRED for MethodChannel & EventChannel
-import 'package:external_app_launcher/external_app_launcher.dart';
-
-// --- ENUMS ---
-enum AppState { loading, nameInput, goalSetting, nightRest, dashboard, failureReason }
+import 'dart:developer';
+import 'package:intl/intl.dart';
+import 'package:focusdesk/models/app_state.dart';
+import '../services/storage_service.dart';
 
 class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
-  // --- STATE VARIABLES ---
+  final StorageService _storage = StorageService();
+
+  // --- CORE STATE ---
   AppState _currentState = AppState.loading;
   String _userName = "";
-  bool _goalsCompleted = false;
-
   Timer? _timeCheckTimer;
 
-  // 1. DATA STORAGE
+  String _goal30 = '';
+  String _goal60 = '';
+  String _goalLongTerm = '';
+
+  // --- DAILY GOALS STATE ---
   List<String> _savedGoals = [];
   Map<String, bool> _goalStates = {};
+  bool _goalsCompleted = false;
 
-
+  // --- STRATEGY & COSMETICS STATE ---
+  String _avatarUrl = "https://api.dicebear.com/9.x/lorelei/png?seed=Sasha";
   List<String> _wallpaperPaths = [];
   bool _isWallpaperSetupDone = false;
+  int _currentStreak = 0;
 
-  // 2. GETTERS
+  // --- MULTI-DAY GAP STATE ---
+  List<String> _missedDays = [];
+
+  // =========================================================
+  // GETTERS
+  // =========================================================
   AppState get currentState => _currentState;
   String get userName => _userName;
-  bool get goalsCompleted => _goalsCompleted;
   List<String> get savedGoals => _savedGoals;
   Map<String, bool> get goalStates => _goalStates;
+  bool get goalsCompleted => _goalsCompleted;
+  String get goal30 => _goal30;
+  String get goal60 => _goal60;
+  String get goalLongTerm => _goalLongTerm;
+  String get avatarUrl => _avatarUrl;
+  int get currentStreak => _currentStreak;
   List<String> get wallpaperPaths => _wallpaperPaths;
   bool get isWallpaperSetupDone => _isWallpaperSetupDone;
+  List<String> get missedDays => List.unmodifiable(_missedDays);
 
-  // Default value
-  String _avatarUrl = "https://api.dicebear.com/9.x/lorelei/png?seed=Sasha";
-
-  // --- NOTIFICATION STATE ---
-  List<NotificationEvent> _notifications = [];
-  bool _hasNewNotifications = false;
-
-  List<NotificationEvent> get notifications => _notifications;
-  bool get hasNewNotifications => _hasNewNotifications;
-
-  // --- NATIVE CHANNELS (Must match MainActivity.kt exactly) ---
-  static const _methodChannel = MethodChannel('com.example.focusdesk/settings');      // For Buttons
-  static const _eventChannel = EventChannel('com.example.focusdesk/notifications');   // For Data Streams
-
-  String get avatarUrl => _avatarUrl;
-
-  StreamSubscription? _subscription;
-
-  // --- CONSTRUCTOR ---
   AppProvider() {
-    // 1. Start listening to App Lifecycle (Background/Foreground changes)
     WidgetsBinding.instance.addObserver(this);
-    _initApp();
-    // NEW: Check every minute
-    _timeCheckTimer = Timer.periodic(const Duration(minutes: 1), (timer) {
-      _refreshTimeCheck();
+    _initApp().then((_) {
+      _timeCheckTimer = Timer.periodic(
+        const Duration(minutes: 1),
+            (_) => _refreshTimeCheck(),
+      );
     });
   }
 
-  // --- DISPOSE (CLEANUP) ---
-  @override
-  void dispose() {
-    // 2. Stop listening to lifecycle changes to prevent memory leaks
-    WidgetsBinding.instance.removeObserver(this);
-    _subscription?.cancel();
-    _timeCheckTimer?.cancel(); // <--- Stop the timer
-    super.dispose();
+  // =========================================================
+  // INIT
+  // =========================================================
+
+  Future<void> _initApp() async {
+    log("[AppProvider] Initializing...");
+
+    try {
+      await _storage.init().timeout(
+        const Duration(seconds: 20),
+        onTimeout: () {
+          log("[AppProvider] WARNING: storage.init() timed out!");
+        },
+      );
+    } catch (e) {
+      log("[AppProvider] ERROR: storage.init() failed: $e");
+    }
+
+    try {
+      await _storage.warmCache().timeout(
+        const Duration(seconds: 10),
+        onTimeout: () {
+          log("[AppProvider] WARNING: warmCache() timed out!");
+        },
+      );
+    } catch (e) {
+      log("[AppProvider] ERROR: warmCache() failed: $e");
+    }
+
+    try {
+      _avatarUrl =
+      await _storage.getAvatarUrl().timeout(const Duration(seconds: 3));
+    } catch (_) {}
+
+    try {
+      _isWallpaperSetupDone = await _storage
+          .isWallpaperSetupDone()
+          .timeout(const Duration(seconds: 3));
+    } catch (_) {}
+
+    try {
+      _wallpaperPaths =
+      await _storage.getWallpapers().timeout(const Duration(seconds: 3));
+    } catch (_) {}
+
+    try {
+      _currentStreak = await _storage
+          .getCurrentStreak()
+          .timeout(const Duration(seconds: 3));
+    } catch (_) {}
+
+    try {
+      _userName =
+      await _storage.getUserName().timeout(const Duration(seconds: 5));
+    } catch (_) {}
+
+    try {
+      _goal30 = await _storage.getGoal30().timeout(const Duration(seconds: 5));
+    } catch (_) {}
+
+    try {
+      _goal60 = await _storage.getGoal60().timeout(const Duration(seconds: 5));
+    } catch (_) {}
+
+    try {
+      _goalLongTerm =
+      await _storage.getGoalLongTerm().timeout(const Duration(seconds: 5));
+    } catch (_) {}
+
+    if (_userName.trim().isEmpty) {
+      _changeState(AppState.nameInput);
+      return;
+    }
+    if (_goalLongTerm.trim().isEmpty) {
+      _changeState(AppState.longTermGoalSetting);
+      return;
+    }
+
+    await _checkTimeAndGoals();
   }
 
   // =========================================================
-  // LIFECYCLE LISTENER (THE FIX)
+  // LIFECYCLE
   // =========================================================
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // 3. When the app comes back to the foreground (Resumed)
     if (state == AppLifecycleState.resumed) {
-      // Force a re-check of Time and Goals
-      _refreshTimeCheck();
+      _timeCheckTimer?.cancel();
+      _timeCheckTimer = Timer.periodic(
+        const Duration(minutes: 1),
+            (_) => _refreshTimeCheck(),
+      );
+
+      Future.microtask(() async {
+        await _refreshTimeCheck();
+      });
     }
   }
 
   Future<void> _refreshTimeCheck() async {
-    // We grab prefs again and run the exact same logic as startup
-    final prefs = await SharedPreferences.getInstance();
-    await _checkTimeAndGoals(prefs);
-    // notifyListeners() is called inside _checkTimeAndGoals, so UI updates automatically
+    if (_userName.trim().isEmpty || _goalLongTerm.trim().isEmpty) return;
+    await _checkTimeAndGoals();
+  }
+
+  Future<void> retryInit() async {
+    _changeState(AppState.loading);
+    await _initApp();
   }
 
   // =========================================================
-  // INITIALIZATION & CORE LOGIC
+  // CORE ROUTING LOGIC
   // =========================================================
-  Future<void> _initApp() async {
-    final prefs = await SharedPreferences.getInstance();
 
-    // A. Check Name
-    String? name = prefs.getString('playerName');
-    if (name == null || name.isEmpty) {
-      _currentState = AppState.nameInput;
-      notifyListeners();
-      return;
-    }
-    _userName = name;
-
-    String? savedAvatar = prefs.getString('user_avatar_url');
-    if (savedAvatar != null && savedAvatar.isNotEmpty) {
-      _avatarUrl = savedAvatar;
-    }
-
-    // B. Check Wallpaper Memory
-    _isWallpaperSetupDone = prefs.getBool('wallpaper_setup_done') ?? false;
-    _wallpaperPaths = prefs.getStringList('saved_wallpapers') ?? [];
-
-    // C. Check Time & Goals
-    await _checkTimeAndGoals(prefs);
-  }
-
-  Future<void> updateAvatar(String newUrl) async {
-    final prefs = await SharedPreferences.getInstance();
-
-    // 1. Save to phone storage
-    await prefs.setString('user_avatar_url', newUrl);
-
-    // 2. Update local state
-    _avatarUrl = newUrl;
-
-    // 3. Tell UI to update
-    notifyListeners();
-  }
-
-  Future<void> _checkTimeAndGoals(SharedPreferences prefs) async {
+  Future<void> _checkTimeAndGoals() async {
     final now = DateTime.now();
     final todayKey = DateFormat('yyyy-MM-dd').format(now);
-    final yesterday = now.subtract(const Duration(days: 1));
-    final yesterdayKey = DateFormat('yyyy-MM-dd').format(yesterday);
+    final todayDate = DateTime(now.year, now.month, now.day);
 
-    // 1. Night Rest (00:00 - 06:00)
-    if (now.hour >= 0 && now.hour < 6) {
-      await _loadDataForDate(prefs, yesterdayKey);
-      _currentState = AppState.nightRest;
-      notifyListeners();
+    // ── Multi-day gap detection via last date user saved goals ──
+    // Using getLastDateWithGoals() instead of last_opened so that
+    // simply opening the app (night rest etc.) never poisons the anchor date.
+    String? lastGoalDateStr;
+    try {
+      lastGoalDateStr = await _storage
+          .getLastDateWithGoals()
+          .timeout(const Duration(seconds: 3));
+    } catch (_) {}
+
+    _missedDays = [];
+    if (lastGoalDateStr != null) {
+      // getLastDateWithGoals() returns a plain yyyy-MM-dd string — no timezone conversion needed.
+      final lastDateOnly = DateTime.parse(lastGoalDateStr);
+      final daysSinceRecord = todayDate.difference(lastDateOnly).inDays;
+
+      if (daysSinceRecord > 1) {
+        for (int i = 1; i < daysSinceRecord; i++) {
+          final candidate = lastDateOnly.add(Duration(days: i));
+          final candidateKey = DateFormat('yyyy-MM-dd').format(candidate);
+
+          if (candidateKey != todayKey) {
+            _missedDays.add(candidateKey);
+          }
+        }
+        log("[AppProvider] Unaccounted days found: $_missedDays");
+
+        try {
+          await _storage.resetStreak();
+          _currentStreak = 0;
+          notifyListeners();
+        } catch (e) {
+          log("[AppProvider] Failed to reset streak: $e");
+        }
+      }
+    }
+    // ────────────────────────────────────────────────────────
+
+    // Load today's goals and statuses.
+    try {
+      _savedGoals = await _storage
+          .getTodayGoals(todayKey)
+          .timeout(const Duration(seconds: 3));
+      _goalStates = await _storage
+          .getGoalStatuses(todayKey)
+          .timeout(const Duration(seconds: 3));
+    } catch (e) {
+      log("[AppProvider] Goal load failed: $e");
+    }
+
+    _goalsCompleted = _savedGoals.isNotEmpty &&
+        _savedGoals.every((g) => _goalStates[g] == true);
+
+    try {
+      _currentStreak = await _storage
+          .getCurrentStreak()
+          .timeout(const Duration(seconds: 3));
+    } catch (_) {}
+
+    final String yesterdayKey =
+    DateFormat('yyyy-MM-dd').format(now.subtract(const Duration(days: 1)));
+    final String primaryMissedKey =
+    _missedDays.isNotEmpty ? _missedDays.last : yesterdayKey;
+
+    bool reasonGiven = false;
+    try {
+      reasonGiven = await _storage
+          .hasFailureReason(primaryMissedKey)
+          .timeout(const Duration(seconds: 3));
+    } catch (_) {}
+
+    _safePushBridgeState(todayKey, reasonGiven);
+
+    // ROUTING RULE 1: Night Rest
+    if (now.hour < 6) {
+      _changeState(AppState.nightRest);
       return;
     }
 
-    // 2. Check Yesterday's Accountability
-    bool yesterdayHadGoals = prefs.containsKey('goals_$yesterdayKey');
+    // ROUTING RULE 2: Multi-day gap
+    if (_missedDays.isNotEmpty && !reasonGiven) {
+      List<String> missedGoals = [];
+      Map<String, bool> missedStates = {};
+      try {
+        missedGoals = await _storage
+            .getTodayGoals(primaryMissedKey)
+            .timeout(const Duration(seconds: 3));
+        missedStates = await _storage
+            .getGoalStatuses(primaryMissedKey)
+            .timeout(const Duration(seconds: 3));
+      } catch (_) {}
 
-    if (yesterdayHadGoals) {
-      bool yesterdayCompleted = prefs.getBool('completed_$yesterdayKey') ?? false;
-      bool reasonGiven = prefs.containsKey('reason_$yesterdayKey');
-
-      if (yesterdayCompleted) {
-        await _loadDataForDate(prefs, yesterdayKey);
-        await _addToHistory(
-            date: yesterdayKey,
-            isSuccess: true,
-            allGoals: _savedGoals,
-            goalStatus: _goalStates
-        );
+      if (missedGoals.isNotEmpty) {
+        _savedGoals = missedGoals;
+        _goalStates = missedStates;
+      } else {
+        _savedGoals = ["No goals were set during the missed days"];
+        _goalStates = {"No goals were set during the missed days": false};
       }
 
-      if (!yesterdayCompleted && !reasonGiven) {
-        await _loadDataForDate(prefs, yesterdayKey);
-        _currentState = AppState.failureReason;
-        notifyListeners();
-        return;
-      }
+      _changeState(AppState.failureReason);
+      return;
     }
 
-    // 3. Load Today
-    await _loadDataForDate(prefs, todayKey);
+    // ROUTING RULE 3: Standard goal setting / yesterday accountability
+    if (_savedGoals.isEmpty) {
+      List<String> yesterdayGoals = [];
+      Map<String, bool> yesterdayStates = {};
 
-    if (_savedGoals.isNotEmpty) {
-      _currentState = AppState.dashboard;
+      try {
+        yesterdayGoals = await _storage
+            .getTodayGoals(yesterdayKey)
+            .timeout(const Duration(seconds: 3));
+      } catch (_) {}
+
+      final hadGoalsYesterday = yesterdayGoals.isNotEmpty;
+      bool failedYesterday = false;
+
+      // isFirstDay = user has never saved goals ever
+      final isFirstDay = lastGoalDateStr == null;
+
+      if (hadGoalsYesterday) {
+        try {
+          yesterdayStates = await _storage
+              .getGoalStatuses(yesterdayKey)
+              .timeout(const Duration(seconds: 3));
+        } catch (_) {}
+
+        final yesterdayCompleted =
+        yesterdayGoals.every((g) => yesterdayStates[g] == true);
+        failedYesterday = !yesterdayCompleted;
+
+        if (yesterdayCompleted) {
+          try {
+            await _storage.logDayToHistory(
+              date: yesterdayKey,
+              isSuccess: true,
+              allGoals: yesterdayGoals,
+              goalStatus: yesterdayStates,
+              reason: "Mission Accomplished",
+            );
+            _currentStreak = await _storage
+                .getCurrentStreak()
+                .timeout(const Duration(seconds: 3));
+          } catch (e) {
+            log("[AppProvider] logDayToHistory failed: $e");
+          }
+        }
+      } else if (!isFirstDay) {
+        failedYesterday = true;
+      }
+
+      if (failedYesterday && !reasonGiven) {
+        if (hadGoalsYesterday) {
+          _savedGoals = yesterdayGoals;
+          _goalStates = yesterdayStates;
+        } else {
+          _savedGoals = ["No goals were set yesterday"];
+          _goalStates = {"No goals were set yesterday": false};
+        }
+        _changeState(AppState.failureReason);
+      } else {
+        _savedGoals = [];
+        _goalStates = {};
+        _changeState(AppState.goalSetting);
+      }
     } else {
-      _currentState = AppState.goalSetting;
-    }
-    notifyListeners();
-  }
-
-  Future<void> _loadDataForDate(SharedPreferences prefs, String dateKey) async {
-    _savedGoals = prefs.getStringList('goals_$dateKey') ?? [];
-    _goalsCompleted = prefs.getBool('completed_$dateKey') ?? false;
-
-    _goalStates.clear();
-    for (var goal in _savedGoals) {
-      _goalStates[goal] = prefs.getBool('status_${dateKey}_$goal') ?? false;
+      _changeState(AppState.dashboard);
     }
   }
 
   // =========================================================
-  // ACTIONS (Goals, History, Wallpapers)
+  // USER ACTIONS
   // =========================================================
 
   Future<void> saveName(String name) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('playerName', name);
+    await _storage.saveUserName(name);
     _userName = name;
-    await _checkTimeAndGoals(prefs);
+    _changeState(AppState.longTermGoalSetting);
+  }
+
+  Future<void> saveLongTermStrategy({
+    required String goal30,
+    required String goal60,
+    required String longTerm,
+  }) async {
+    await _storage.saveLongTermStrategy(
+      goal30: goal30,
+      goal60: goal60,
+      goalLong: longTerm,
+    );
+    _goal30 = goal30;
+    _goal60 = goal60;
+    _goalLongTerm = longTerm;
+    notifyListeners();
+
+    await _checkTimeAndGoals();
   }
 
   Future<void> saveGoals(List<String> goals) async {
-    final prefs = await SharedPreferences.getInstance();
-    String dateKey = DateFormat('yyyy-MM-dd').format(DateTime.now());
+    final todayKey = DateFormat('yyyy-MM-dd').format(DateTime.now());
+    await _storage.saveTodayGoals(todayKey, goals);
 
-    await prefs.setStringList('goals_$dateKey', goals);
-    await prefs.setBool('completed_$dateKey', false);
 
-    for(var goal in goals) {
-      await prefs.setBool('status_${dateKey}_$goal', false);
-    }
+    // Record the last date user actually saved goals — used for gap detection.
+    await _storage.setLastOpened(DateTime.now().toUtc().toIso8601String());
 
     _savedGoals = goals;
-    _goalStates.clear();
-    _currentState = AppState.dashboard;
-    notifyListeners();
+    _goalStates = {for (var g in goals) g: false};
+    _goalsCompleted = false;
+
+    _safePushBridgeState(todayKey, false);
+    _changeState(AppState.dashboard);
   }
 
   Future<void> toggleGoalStatus(String goal, bool isDone) async {
-    final prefs = await SharedPreferences.getInstance();
-    String dateKey = DateFormat('yyyy-MM-dd').format(DateTime.now());
-
     _goalStates[goal] = isDone;
-    await prefs.setBool('status_${dateKey}_$goal', isDone);
+    _goalsCompleted = _savedGoals.isNotEmpty &&
+        _savedGoals.every((g) => _goalStates[g] == true);
 
-    bool allDone = _savedGoals.isNotEmpty && _savedGoals.every((g) => _goalStates[g] == true);
-    if (allDone != _goalsCompleted) {
-      await prefs.setBool('completed_$dateKey', allDone);
-      _goalsCompleted = allDone;
+    final now = DateTime.now();
+    final todayKey = DateFormat('yyyy-MM-dd').format(now);
+    final yesterdayKey =
+    DateFormat('yyyy-MM-dd').format(now.subtract(const Duration(days: 1)));
+
+    await _storage.toggleGoalStatus(todayKey, goal, isDone, _goalsCompleted);
+
+    bool reasonGiven = false;
+    try {
+      reasonGiven = await _storage
+          .hasFailureReason(yesterdayKey)
+          .timeout(const Duration(seconds: 3));
+    } catch (_) {}
+
+    _safePushBridgeState(todayKey, reasonGiven);
+    notifyListeners();
+  }
+
+  Future<void> submitFailureReason(String reason) async {
+    final now = DateTime.now();
+    final todayKey = DateFormat('yyyy-MM-dd').format(now);
+    final yesterdayKey =
+    DateFormat('yyyy-MM-dd').format(now.subtract(const Duration(days: 1)));
+
+    final List<String> daysToLog =
+    _missedDays.isNotEmpty ? List.from(_missedDays) : [yesterdayKey];
+
+    log("[AppProvider] submitFailureReason: logging reason for days: $daysToLog");
+
+    for (final dayKey in daysToLog) {
+      List<String> goalsForDay = [];
+      Map<String, bool> statusesForDay = {};
+      try {
+        goalsForDay = await _storage
+            .getTodayGoals(dayKey)
+            .timeout(const Duration(seconds: 3));
+        statusesForDay = await _storage
+            .getGoalStatuses(dayKey)
+            .timeout(const Duration(seconds: 3));
+      } catch (_) {}
+
+      final allGoals = goalsForDay.isEmpty ? ["No goals set"] : goalsForDay;
+      final goalStatus = goalsForDay.isEmpty
+          ? {"No goals set": false}
+          : statusesForDay;
+
+      await _storage.saveFailureReason(dayKey, reason);
+      await _storage.logDayToHistory(
+        date: dayKey,
+        isSuccess: false,
+        allGoals: allGoals,
+        goalStatus: goalStatus,
+        reason: reason,
+      );
     }
+
+    _missedDays = [];
+    _savedGoals = [];
+    _goalStates = {};
+
+    _safePushBridgeState(todayKey, true);
+    await _checkTimeAndGoals();
+  }
+
+  // ─── VISUALS ──────────────────────────────────────────────
+
+  Future<void> updateAvatar(String url) async {
+    await _storage.saveAvatarUrl(url);
+    _avatarUrl = url;
     notifyListeners();
   }
 
   Future<void> saveWallpapers(List<String> paths) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList('saved_wallpapers', paths);
-    await prefs.setBool('wallpaper_setup_done', true);
-
+    await _storage.saveWallpapers(paths);
     _wallpaperPaths = paths;
     _isWallpaperSetupDone = true;
     notifyListeners();
   }
 
-  Future<void> submitFailureReason(String reason) async {
-    final prefs = await SharedPreferences.getInstance();
-    final now = DateTime.now();
-    final yesterday = now.subtract(const Duration(days: 1));
-    final yesterdayKey = DateFormat('yyyy-MM-dd').format(yesterday);
+  // ─── HISTORY ──────────────────────────────────────────────
 
-    await prefs.setString('reason_$yesterdayKey', reason);
+  Future<List<Map<String, dynamic>>> getHistory() => _storage.getHistory();
 
-    await _addToHistory(
-        date: yesterdayKey,
-        isSuccess: false,
-        allGoals: _savedGoals,
-        goalStatus: _goalStates,
-        reason: reason
-    );
-    await _checkTimeAndGoals(prefs);
-  }
+  Future<Map<String, dynamic>> getFullContext() async {
+    final storageData = await _storage.getFullContext();
 
-  Future<void> _addToHistory({
-    required String date,
-    required bool isSuccess,
-    required List<String> allGoals,
-    required Map<String, bool> goalStatus,
-    String? reason,
-  }) async {
-    final prefs = await SharedPreferences.getInstance();
-    String? existingJson = prefs.getString('user_history_db');
-    List<dynamic> historyList = existingJson != null ? jsonDecode(existingJson) : [];
+    final todayKey = DateFormat('yyyy-MM-dd').format(DateTime.now());
+    final List<Map<String, dynamic>> todayTasks =
+    _savedGoals.map((goal) => {
+      "title": goal,
+      "is_completed": _goalStates[goal] ?? false,
+    }).toList();
 
-    bool alreadyExists = historyList.any((record) => record['date'] == date);
-    if (alreadyExists) return;
-
-    List<String> completedList = [];
-    List<String> incompleteList = [];
-
-    for (var goal in allGoals) {
-      if (goalStatus[goal] == true) {
-        completedList.add(goal);
-      } else {
-        incompleteList.add(goal);
-      }
-    }
-
-    Map<String, dynamic> newRecord = {
-      "date": date,
-      "status": isSuccess ? "Completed" : "Incomplete",
-      "total_goals": allGoals,
-      "completed_goals": completedList,
-      "incomplete_goals": incompleteList,
-      "reason": reason ?? "N/A"
+    return {
+      "user_profile": {
+        "name": storageData['user']['name'] ?? '',
+        "current_streak": storageData['user']['current_streak'] ?? 0,
+        "longest_streak": storageData['user']['longest_streak'] ?? 0,
+      },
+      "strategy": {
+        "30_day": storageData['user']['goal_30'] ?? '',
+        "60_day": storageData['user']['goal_60'] ?? '',
+        "long_term": storageData['user']['goal_long'] ?? '',
+      },
+      "today_plan": {
+        "date": todayKey,
+        "tasks": todayTasks,
+      },
+      "history": storageData['history'] ?? [],
     };
-
-    historyList.add(newRecord);
-    await prefs.setString('user_history_db', jsonEncode(historyList));
-  }
-
-  Future<List<Map<String, dynamic>>> getHistory() async {
-    final prefs = await SharedPreferences.getInstance();
-    String? existingJson = prefs.getString('user_history_db');
-    if (existingJson == null) return [];
-    List<dynamic> rawList = jsonDecode(existingJson);
-    return rawList.map((e) => Map<String, dynamic>.from(e)).toList();
   }
 
   // =========================================================
-  // NOTIFICATION LOGIC (NATIVE BRIDGE)
+  // PRIVATE HELPERS
   // =========================================================
 
-  // 1. START LISTENING (Uses EventChannel)
-  void startListeningToNotifications() {
-    try {
-      _subscription = _eventChannel.receiveBroadcastStream().listen((dynamic event) {
-        if (event is Map) {
-          final String action = event['action'] ?? 'POST';
-          final String? id = event['id']; // This is now the "Smart ID" (Package|Title)
-
-          // Safety Check: If we don't have an ID, we can't do anything.
-          if (id == null || id.isEmpty) return;
-
-          if (action == "REMOVE") {
-            // --- HANDLE REMOVAL ---
-            // Synced with Desktop/Phone. If you read it there, it goes away here.
-            _notifications.removeWhere((n) => n.id == id);
-            if (_notifications.isEmpty) _hasNewNotifications = false;
-            notifyListeners();
-          }
-          else {
-            // --- HANDLE POST (Add or Update) ---
-            final String? title = event['title'];
-            final String? text = event['text'];
-            final String pkg = event['package'] ?? "";
-
-            // Ghost Check: If title or text is null, ignore it.
-            if (title == null || text == null) return;
-
-            // DEDUPLICATION: Check if we already have a row for this Sender (Smart ID)
-            final int existingIndex = _notifications.indexWhere((n) => n.id == id);
-
-            if (existingIndex != -1) {
-              // UPDATE: We found the sender. Update the text.
-              // This solves the "10 messages" spam. It just updates the same row 10 times.
-              _notifications[existingIndex] = NotificationEvent(
-                id: id,
-                packageName: pkg,
-                title: title,
-                text: text,
-                createAt: DateTime.now(),
-              );
-
-              // Optional: Move the updated conversation to the top
-              final updatedItem = _notifications.removeAt(existingIndex);
-              _notifications.insert(0, updatedItem);
-            } else {
-              // INSERT: New sender we haven't seen yet.
-              _notifications.insert(0, NotificationEvent(
-                id: id,
-                packageName: pkg,
-                title: title,
-                text: text,
-                createAt: DateTime.now(),
-              ));
-              _hasNewNotifications = true;
-            }
-            notifyListeners();
-          }
-        }
-      }, onError: (dynamic error) {
-        debugPrint("Native Bridge Error: $error");
-      });
-    } catch (e) {
-      debugPrint("Error connecting to notification stream: $e");
-    }
-  }
-
-  // 2. STOP LISTENING
-  void stopListening() {
-    _subscription?.cancel();
-  }
-
-  // 3. OPEN SETTINGS (Uses MethodChannel)
-  Future<void> openNotificationSettings() async {
-    try {
-      await _methodChannel.invokeMethod('openSettings');
-    } catch (e) {
-      debugPrint("Failed to open settings: $e");
-    }
-  }
-
-  // 4. OPEN APP (Uses external_app_launcher)
-  Future<void> openAppFromNotification(String? packageName) async {
-    if (packageName != null) {
+  void _safePushBridgeState(String todayKey, bool reasonGiven) {
+    Future.microtask(() async {
       try {
-        await LaunchApp.openApp(
-          androidPackageName: packageName,
-          openStore: false,
+        await NotificationBridge.push(
+          dateKey: todayKey,
+          goals: _savedGoals,
+          goalStates: _goalStates,
+          currentStreak: _currentStreak,
+          reasonGivenForYesterday: reasonGiven,
+        ).timeout(
+          const Duration(seconds: 5),
+          onTimeout: () {
+            log("[AppProvider] Bridge push timed out — skipping.");
+          },
         );
       } catch (e) {
-        log("Error opening app: $e");
+        log("[AppProvider] Bridge push failed (safe to ignore): $e");
       }
-    }
+    });
   }
 
-  // 5. DISMISS NOTIFICATION
-  void dismissNotification(int index) {
-    if (index >= 0 && index < _notifications.length) {
-      _notifications.removeAt(index);
-      if (_notifications.isEmpty) {
-        _hasNewNotifications = false;
-      }
+  void _changeState(AppState newState) {
+    if (_currentState != newState) {
+      _currentState = newState;
       notifyListeners();
     }
   }
 
-
-
-
-  // NEW SAFE DISMISSAL METHOD
-  void dismissNotificationById(String id) {
-    _notifications.removeWhere((n) => n.id == id);
-    if (_notifications.isEmpty) {
-      _hasNewNotifications = false;
-    }
-    notifyListeners();
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _timeCheckTimer?.cancel();
+    super.dispose();
   }
-
-  // 6. MARK AS READ (Turn off glow)
-  void markNotificationsAsRead() {
-    _hasNewNotifications = false;
-    notifyListeners();
-  }
-}
-
-// --- DATA MODEL ---
-class NotificationEvent {
-  final String id; // This MUST match the Android 'sbn.key'
-  final String packageName;
-  final String title;
-  final String text;
-  final DateTime createAt;
-
-  NotificationEvent({
-    required this.id,
-    required this.packageName,
-    required this.title,
-    required this.text,
-    required this.createAt,
-  });
 }

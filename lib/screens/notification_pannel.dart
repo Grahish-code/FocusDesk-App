@@ -1,17 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
-import '../providers/app_provider.dart';
+
+// --- MODELS & PROVIDERS ---
+import 'package:focusdesk/models/notification_event.dart';
+import '../providers/notification_provider.dart';
 
 class NotificationPanel extends StatelessWidget {
   const NotificationPanel({super.key});
 
-
   @override
   Widget build(BuildContext context) {
-    return Consumer<AppProvider>(
-      builder: (context, provider, child) {
-        final notifs = provider.notifications;
+    // 1. CHANGE: Listen to NotificationProvider instead of AppProvider
+    return Consumer<NotificationProvider>(
+      builder: (context, notifProvider, child) {
+        final notifs = notifProvider.notifications;
 
         // 1. Empty State
         if (notifs.isEmpty) {
@@ -33,18 +36,17 @@ class NotificationPanel extends StatelessWidget {
           itemBuilder: (context, index) {
             final notification = notifs[index];
 
-            // Inside NotificationPanel -> build -> ListView.builder
             return Dismissible(
-              key: Key(notification.id ?? DateTime.now().toString()),
+              key: Key(notification.id), // The ID in your model is non-nullable, so we don't need ??
               direction: DismissDirection.horizontal,
               onDismissed: (direction) {
-                provider.dismissNotificationById(notification.id);
+                // 2. CHANGE: Call dismiss from notifProvider
+                notifProvider.dismissNotificationById(notification.id);
               },
-              // CHANGE: Remove the red container entirely.
-              // We use an empty Container() so it is transparent.
               background: Container(color: Colors.transparent),
 
-              child: _buildItem(context, notification, provider),
+              // 3. CHANGE: Pass notifProvider to the helper widget
+              child: _buildItem(context, notification, notifProvider),
             );
           },
         );
@@ -52,9 +54,11 @@ class NotificationPanel extends StatelessWidget {
     );
   }
 
-  Widget _buildItem(BuildContext context, NotificationEvent event, AppProvider provider) {
+  // 4. CHANGE: Update the parameter to expect NotificationProvider
+  Widget _buildItem(BuildContext context, NotificationBridge event, NotificationProvider notifProvider) {
     return GestureDetector(
-      onTap: () => provider.openAppFromNotification(event.packageName),
+      // 5. CHANGE: Call openApp from notifProvider
+      onTap: () => notifProvider.openAppFromNotification(event.packageName),
       child: Container(
         margin: const EdgeInsets.only(bottom: 10),
         padding: const EdgeInsets.all(12),
@@ -69,23 +73,21 @@ class NotificationPanel extends StatelessWidget {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                // --- FIX: Wrap Title in Expanded ---
                 Expanded(
                   child: Text(
-                    event.title ?? "System",
+                    event.title, // Non-nullable in your model
                     style: GoogleFonts.orbitron(
                         color: Colors.cyanAccent,
                         fontWeight: FontWeight.bold,
                         fontSize: 12
                     ),
-                    maxLines: 1, // Force single line
-                    overflow: TextOverflow.ellipsis, // Adds "..." if too long
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
 
-                const SizedBox(width: 10), // Add some spacing so they don't touch
+                const SizedBox(width: 10),
 
-                // Time stays as is (it doesn't expand)
                 Text(
                     _formatTime(event.createAt),
                     style: GoogleFonts.orbitron(
@@ -97,7 +99,7 @@ class NotificationPanel extends StatelessWidget {
             ),
             const SizedBox(height: 5),
             Text(
-                event.text ?? "",
+                event.text, // Non-nullable in your model
                 style: GoogleFonts.roboto(color: Colors.white70, fontSize: 14),
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis

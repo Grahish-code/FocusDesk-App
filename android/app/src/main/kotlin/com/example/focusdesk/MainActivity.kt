@@ -1,5 +1,6 @@
 package com.example.focusdesk
 
+import android.app.KeyguardManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -11,85 +12,107 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 
-class MainActivity: FlutterActivity() {
-    // 1. DEFINE TWO DIFFERENT CHANNEL NAMES
-    private val CHANNEL_METHOD = "com.example.focusdesk/settings"       // For Buttons
-    private val CHANNEL_STREAM = "com.example.focusdesk/notifications"  // For Data
+class MainActivity : FlutterActivity() {
 
-    // --- NEW: TRACK APP VISIBILITY ---
+    private val CHANNEL_METHOD = "com.example.focusdesk/settings"
+    private val CHANNEL_STREAM = "com.example.focusdesk/notifications"
+
+    private var notificationReceiver: BroadcastReceiver? = null
+
     override fun onResume() {
         super.onResume()
-        // App is Open: Turn the listener ON
         AppState.isAppInForeground = true
     }
 
     override fun onPause() {
         super.onPause()
-        // App is Minimized/Closed: Turn the listener OFF
         AppState.isAppInForeground = false
     }
-    // ---------------------------------
+
+    override fun onStart() {
+        super.onStart()
+        android.util.Log.d("FOCUSDESK_DEBUG", "onStart called — starting service")
+        // ✅ Start service safely in background thread so it never blocks Flutter engine init
+        Thread {
+            try {
+                startUnlockMonitorService()
+            } catch (e: Exception) {
+                android.util.Log.e("FOCUSDESK", "Service start failed safely: ${e.message}")
+            }
+        }.start()
+    }
+
+    private fun startUnlockMonitorService(action: String? = null) {
+        val serviceIntent = Intent(this, UnlockMonitorService::class.java).apply {
+            action?.let { this.action = it }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(serviceIntent)
+        } else {
+            startService(serviceIntent)
+        }
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        // 2. SETUP THE METHOD CHANNEL (For opening settings)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL_METHOD).setMethodCallHandler { call, result ->
-            if (call.method == "openSettings") {
-                startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-                result.success(true)
-            } else {
-                result.notImplemented()
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL_METHOD)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "openSettings" -> {
+                        startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                        result.success(true)
+                    }
+                    "isPhoneLocked" -> {
+                        val km = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+                        result.success(km.isKeyguardLocked)
+                    }
+                    "updateSticky" -> {
+                        android.util.Log.d("FOCUSDESK", "MainActivity caught updateSticky ping!")
+                        startUnlockMonitorService("com.example.focusdesk.ACTION_UPDATE_STICKY")
+                        result.success(true)
+                    }
+                    else -> result.notImplemented()
+                }
             }
-        }
 
-// 3. SETUP THE EVENT CHANNEL (For listening to notifications)
-        EventChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL_STREAM).setStreamHandler(
-            object : EventChannel.StreamHandler {
-                private var receiver: BroadcastReceiver? = null
-
+        EventChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL_STREAM)
+            .setStreamHandler(object : EventChannel.StreamHandler {
                 override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
                     if (events == null) return
-
-                    receiver = object : BroadcastReceiver() {
+                    notificationReceiver = object : BroadcastReceiver() {
                         override fun onReceive(context: Context?, intent: Intent?) {
-                            // --- CHANGED SECTION START ---
-                            // 1. Capture Action and ID (Crucial for fixing spam/ghosts)
-                            val action = intent?.getStringExtra("action") ?: "POST"
-                            val id = intent?.getStringExtra("id") ?: ""
-
-                            // 2. Capture Data (Allow nulls so we don't crash on REMOVE)
-                            val packageName = intent?.getStringExtra("package")
-                            val title = intent?.getStringExtra("title")
-                            val text = intent?.getStringExtra("text")
-
-                            // 3. Send EVERYTHING to Flutter
                             events.success(mapOf(
-                                "action" to action,
-                                "id" to id,
-                                "package" to packageName,
-                                "title" to title,
-                                "text" to text
+                                "action"  to (intent?.getStringExtra("action")  ?: "POST"),
+                                "id"      to (intent?.getStringExtra("id")      ?: ""),
+                                "package" to intent?.getStringExtra("package"),
+                                "title"   to intent?.getStringExtra("title"),
+                                "text"    to intent?.getStringExtra("text")
                             ))
-                            // --- CHANGED SECTION END ---
                         }
                     }
-
                     val filter = IntentFilter("com.example.focusdesk.NOTIFICATION_LISTENER")
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+                        registerReceiver(notificationReceiver, filter, Context.RECEIVER_EXPORTED)
                     } else {
-                        registerReceiver(receiver, filter)
+                        registerReceiver(notificationReceiver, filter)
                     }
                 }
 
                 override fun onCancel(arguments: Any?) {
-                    if (receiver != null) {
-                        unregisterReceiver(receiver)
-                        receiver = null
+                    notificationReceiver?.let {
+                        try { unregisterReceiver(it) } catch (_: Exception) {}
                     }
+                    notificationReceiver = null
                 }
-            }
-        )
+            })
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        notificationReceiver?.let {
+            try { unregisterReceiver(it) } catch (_: Exception) {}
+        }
+        notificationReceiver = null
     }
 }
